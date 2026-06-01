@@ -511,6 +511,11 @@ class AMPPPO:
             policy_state, policy_next_state = sample_amp_policy
             expert_state, expert_next_state = sample_amp_expert
 
+            # 保留 raw 数据用于后面 update normalizer（关键 fix：必须用 raw 数据更新统计量，
+            # 否则 normalizer 会退化成恒等函数 — 见本函数末尾的 update 调用）
+            raw_policy_state = policy_state.clone()
+            raw_expert_state = expert_state.clone()
+
             # 3.10.1 对 AMP 状态做在线均值-方差归一化
             # 注意：用 no_grad 因为归一化参数不参与梯度计算
             if self.amp_normalizer is not None:
@@ -603,11 +608,12 @@ class AMPPPO:
                 self.rnd_optimizer.step()
 
             # ====== 3.12 [AMP新增] 更新 AMP 状态归一化统计 ======
-            # 用本 batch 的策略和专家数据更新在线均值-方差（Welford 算法）
-            # 注意：此时 policy_state/expert_state 是归一化后的值，更新的是计数统计
+            # 用本 batch 的策略和专家 raw 数据更新在线均值-方差（Welford 算法）
+            # 关键 fix：必须喂 raw 数据，否则 normalizer 收敛到恒等变换，量级差异巨大的
+            # 数据（如 dof_vel ±20 vs policy 早期 ≈0）就会让判别器 trivial 分类。
             if self.amp_normalizer is not None:
-                self.amp_normalizer.update(policy_state.cpu().numpy())
-                self.amp_normalizer.update(expert_state.cpu().numpy())
+                self.amp_normalizer.update(raw_policy_state.cpu().numpy())
+                self.amp_normalizer.update(raw_expert_state.cpu().numpy())
 
             # ====== 3.13 累加损失统计 ======
             mean_value_loss += value_loss.item()

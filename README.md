@@ -1,3 +1,5 @@
+> **声明：该仓库仅用做个人学习代码框架，无其他用途。**
+
 # TienKung-Lab: Direct IsaacLab Workflow for TienKung
 
 [![IsaacSim](https://img.shields.io/badge/IsaacSim-4.5.0-silver.svg)](https://docs.omniverse.nvidia.com/isaacsim/latest/overview.html)

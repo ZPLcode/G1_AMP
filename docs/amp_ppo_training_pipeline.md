@@ -22,6 +22,8 @@
 13. [完整调用栈](#13-完整调用栈)
 14. [关键设计要点](#14-关键设计要点)
 15. [实验记录与关键发现](#15-实验记录与关键发现)
+16. [训练机制深入：感知、地形、并行](#16-训练机制深入感知地形并行)
+17. [与业界 SOTA 的对比](#17-与业界-sota-的对比)
 
 ---
 
@@ -1256,6 +1258,604 @@ baseline 跑 2999 步，新实验跑 9935 步——**不同步数的对比有失
 - 后续计划（下一步实验）
 
 **这就是面试官最想听的"完整的研究闭环"。**
+
+---
+
+### 15.11 发现八：纯 PPO 突破速度上限的尝试（run_ppo_fast）
+
+**实验设计**：基于 run baseline，去掉 AMP，扩大速度上限。
+
+**修改**：
+- 算法：AMP-PPO → 纯 PPO
+- 速度上限：`lin_vel_x = (-0.6, 1.0)` → `(-1.0, 3.0)`
+- 步态周期：`gait_cycle = 0.5s → 0.4s`
+
+**结果**（iter 6370）：
+
+| 指标 | run baseline | run_ppo_fast |
+|--|--|--|
+| mean_reward | 69.5 | 44.6 |
+| episode_length | 990 | 990 |
+| track_lin_vel_xy | 0.52 | 0.53 |
+| gait_feet_frc_perio | 0.69 | **0.91** ⭐ |
+| hip_roll_action | -0.31 | -0.32 |
+
+reward 下降是因为没有 0.3 倍的 AMP 加分，但任务奖励本身保持。
+
+**OOD 测试发现**（play.py vx 测试）：
+
+| 指令 vx | 表现 |
+|--|--|
+| 1.0（训练上限） | 正常 |
+| 2.0（2x OOD） | **能跑** |
+| 3.0（3x OOD） | **原地不动**（奖励信号太弱） |
+| 5.0（远超训练） | **反向行走**（神经网络外推奇观） |
+
+**3 个反直觉发现**：
+
+1. **vx=3.0 原地不动**：`track_lin_vel_xy_exp = exp(-err²/0.5)` 用窄高斯，物理上跑不到 3 m/s 时奖励永远 ≈ 0，策略学到"高速指令是 dead zone，不如不动"
+2. **vx=5.0 反向行走**：神经网络在远 OOD 输入下输出不可预测
+3. **手臂乱晃**：关闭 AMP 后只剩 `joint_deviation_arms = -0.2` 弱惩罚，PPO 把手当成"角动量补偿工具"提供平衡（reward hacking）
+
+**经典对话片段**：
+
+```
+我："这是 OOD 失败"
+用户："但 vx=3 在训练范围内啊？"
+我（深挖后）："奖励函数 std=0.5 太窄，让训练范围内的高速也变成 dead zone"
+```
+
+---
+
+### 15.12 发现九：专家动捕速度的反推分析
+
+**问题**：run.txt 专家到底跑多快？
+
+**方法**：用 Python 解析 `run.txt`，反推身体速度：
+
+```python
+# 假设：足部在支撑相相对地面静止
+# 足部相对身体速度 = -身体相对地面速度
+foot_l_vel = np.diff(foot_l_pos, axis=0) / dt
+stance_mask = foot_l_pos[:, 2] < z_threshold
+body_vx = -foot_l_vel[stance_mask, 0].mean()
+```
+
+**结果**：
+
+| 数据 | 估算速度 | 含义 |
+|--|--|--|
+| walk.txt | 0.70 m/s | 慢走（不到正常人走路速度一半） |
+| run.txt | 0.90 m/s | **比正常人走路还慢！** |
+
+**这彻底解释了 OOD 失败**：
+
+| 指令 vx | 倍数 vs 专家 0.9 m/s | 失败模式 |
+|--|--|--|
+| 1.0 | 1.1x | 正常 |
+| 2.0 | 2.2x | 大幅 OOD 但 PPO 物理能扛 |
+| 3.0 | 3.3x | 完全 OOD，判别器都没见过 |
+
+**关键洞察**：
+
+> **`walk` 和 `run` 任务的本质区别不是速度，而是步态时钟参数。** 速度指令范围一模一样（都是 -0.6 到 1.0 m/s），唯一区别是 `gait_cycle`（0.85 vs 0.5）和 `air_ratio`（0.38 vs 0.6）。所以 `run` 不是"跑得快"，是"用跑步姿态走专家速度"。
+
+**面试谈资**：
+
+> "我用足部支撑相反推法 + FFT 步频估算交叉验证，发现 `run.txt` 专家实际速度只有 0.9 m/s。这揭示了 TienKung-Lab 设计的一个隐藏事实：`run` 任务的本质不是速度更快，而是**用跑步的步态时钟节奏走专家速度**。也因此当我给 vx=3.0 指令时策略直接摔倒——不是简单的 OOD，是数据驱动方法的根本上限：**策略的速度上限受专家动捕速度限制**。"
+
+---
+
+### 15.13 发现十：教科书级的分布坍塌（walk_terrain_sensor）
+
+**实验设计**：在 walk_with_sensor 基础上启用 ROUGH 复杂地形 + height_scanner，4 个奖励放宽适应地形。
+
+**结果**（iter 7999，看似成功）：
+
+| 指标 | walk baseline | walk_terrain_sensor |
+|--|--|--|
+| mean_reward | 65.7 | **66.1** |
+| mean_episode_length | 984 | **974** |
+| track_lin_vel_xy | 0.52 | 0.43 |
+| gait_feet_frc_perio | 0.69 | 0.65 |
+
+**数字几乎和 walk baseline 持平**——看起来"任务完成"。
+
+**但 Curriculum 曲线暴露真相**：
+
+```
+Curriculum/terrain_levels:
+  iter 0:     mean_level = 0.5  (等级 4-5)
+  iter 1500:  mean_level = 0.6  (升到 5-6，策略在试图进步)
+  iter 7999:  mean_level = 0.41 (退回到 3-4，整体退化 30%)
+```
+
+**真相**：policy 学到了"宅在最易等级的平地附近活动"——避开所有难地形。
+
+**双重 Reward Hacking 发现**：
+
+| 层次 | 现象 | 原因 |
+|--|--|--|
+| 第一层 | 原地踏步 | `gait_feet_frc_perio` 等步态奖励占满分，踏步就能拿 |
+| 第二层 | **跑到地形外平地** | `border_width=20` 提供超大避难所 |
+
+**核心教训**：
+
+> **Reward = 66 不等于训练成功。** 必须看任务难度分布——Curriculum mean 在下降说明 policy 在"退化"而非"进步"。
+
+**对比模型 vs 失败模型**：
+
+| | 表面 | 实际 |
+|--|--|--|
+| 看 reward | 66（≈ baseline） | "策略学得不错" |
+| 看 episode_length | 974 | "稳定能走" |
+| 看 Curriculum | **0.6 → 0.41** | **退化中** ⚠️ |
+
+**业界标准修复方案**（按优先级）：
+
+1. **强化 velocity reward** (`weight=3.0`)：让前进成为主要分数来源
+2. **缩小 border** (`border_width=2.0`)：消除地形外避难所
+3. **Forward progress reward**：直接奖励位移（写新函数）
+4. **Teacher-Student**：终极方案（工作量大）
+
+**面试谈资**（顶级）：
+
+> "我做的最有教育意义的实验是 walk_terrain_sensor——它产生了一个**教科书级别的 Curriculum Learning 失败**。
+> 
+> 表面看 reward 66、episode 974，和 walk baseline 持平，似乎成功了。但**Curriculum 曲线暴露了真相**：mean_terrain_level 从 0.6 持续跌到 0.41，说明 policy 不是在'变强'，而是在'退化到舒适区'。
+> 
+> 深入观察发现**双重 Reward Hacking**：
+> - 步态时钟奖励让原地踏步也能拿满分（gait_feet_frc_perio=0.65）
+> - border_width=20m 的缓冲带成了完美避难所，机器人直接走出 ROUGH 地形
+> 
+> **这个失败让我深刻理解了 RL 应用的核心难题**：Specification Gaming（DeepMind 经典论文）——手工 reward 几乎总能被 RL 找到漏洞。
+> 
+> 业界 SOTA（Extreme Parkour、ANYmal Parkour）的应对是 4 件套组合：reward 重构 + 缩小避难空间 + Forward progress reward + Teacher-Student。我的项目作为单阶段方法只能用前 3 种，第 4 种需要重构整个训练流程。
+> 
+> **如果让我重做，我会先实施前 3 种（约 10 行代码 + 1 个新 reward 函数），预计能让 mean_terrain_level 稳定上升到 0.7+**。"
+
+---
+
+## 16. 训练机制深入：感知、地形、并行
+
+> 本节深入解释训练系统的几个核心机制，
+> 包括感知（observation vs reward）、复杂地形训练、4096 个机器人的物理布局、Curriculum Learning。
+
+### 16.1 观测 vs 奖励：高程图怎么起作用
+
+**核心概念区分：**
+
+```
+观测 (Observation):  机器人"能看到什么"      → 决策的输入
+奖励 (Reward):       机器人"应该追求什么"    → 决策的目标
+```
+
+加 height_scanner 属于**观测扩展**，不是新增奖励。给机器人**更多信息**做决策，但不改变它的目标。
+
+#### 代码层面：高程图怎么进入网络
+
+`base_env.py` 中：
+
+```python
+if self.cfg.scene.height_scanner.enable_height_scan:
+    height_scan = (
+        self.height_scanner.data.pos_w[:, 2].unsqueeze(1)
+        - self.height_scanner.data.ray_hits_w[..., 2]
+        - self.cfg.normalization.height_scan_offset
+    ) * self.obs_scales.height_scan
+
+    critic_obs = torch.cat([critic_obs, height_scan], dim=-1)   # 拼到 critic 观测
+    actor_obs  = torch.cat([actor_obs, height_scan], dim=-1)    # 拼到 actor 观测
+```
+
+直接 `cat` 到观测向量末尾：
+
+```
+原 actor obs (75 维):  [角速度, 重力, 速度指令, 关节位置, 关节速度, 上步动作, 步态相位]
+                                            ↓ cat
+新 actor obs (235 维): [..., 高度1, 高度2, ..., 高度160]
+                                            ↑
+                                      新增的 160 维高度图
+```
+
+#### 网络结构自动适配
+
+`actor_critic.py` 根据 `num_actor_obs` 动态构造网络：
+
+```python
+actor_layers.append(nn.Linear(num_actor_obs, actor_hidden_dims[0]))
+```
+
+启用 height_scan 后，第一层 Linear 自动变成 `nn.Linear(2350, 512)`（10 步堆叠后）。
+
+#### 为什么 reward 不用改
+
+reward 描述"想要什么结果"——速度跟得准、不摔倒、步态周期对齐。这些目标**在平地和复杂地形都一样**。
+
+变化的是"怎么达到目标"——平地可以闭眼走，复杂地形需要看路。但**方法（policy）是 PPO 自己学的**，不是手写 reward 指定的。
+
+**这就是 end-to-end learning 的威力**——只要奖励定义正确，剩下的让网络从观测里自己学。
+
+### 16.2 Curriculum Learning（课程学习）详解
+
+#### 核心思想
+
+```
+直接学难任务 → 完全做不到 → reward = 0 → 学不到东西
+
+从简单任务开始 → 容易成功 → reward 高 → 学到基础能力
+       ↓
+逐步加难度 → 基于已学技能挑战新难度 → 持续进步
+       ↓
+最终能做最难任务
+```
+
+#### 在 TienKung-Lab 里的实现
+
+`ROUGH_TERRAINS_CFG` 配置：
+
+```python
+ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
+    curriculum=True,            # 启用课程学习
+    num_rows=10,                # 10 个难度等级
+    num_cols=20,                # 每等级 20 种地形变体
+    sub_terrains={
+        "pyramid_stairs_28": MeshInvertedPyramidStairsTerrainCfg(
+            step_height_range=(0.0, 0.23),    # 高度从 0 到 23cm
+            ...
+        ),
+        # ... 4 种楼梯 + boxes + random_rough + wave + high_platform
+    },
+)
+```
+
+地形被组织成 **10 行 × 20 列的网格**：
+
+```
+            列 0    列 1    列 2  ...  列 19
+行 0 (最易)  楼梯    方块    波浪  ...  坑洞    ← 全部小尺寸/小高度
+行 1         楼梯    方块    波浪  ...  坑洞    ← 稍大
+行 2         楼梯    方块    波浪  ...  坑洞    ← 更大
+...
+行 9 (最难)  楼梯    方块    波浪  ...  坑洞    ← 最大尺寸
+```
+
+#### 升降级机制
+
+```python
+# IsaacLab 默认规则
+distance > 0.5 * terrain_length   → 升级（移到下一行）
+distance < 0.5 * cmd_vel * dur    → 降级（移到上一行）
+```
+
+简单说：**走得快 + 走得远 = 升级；走不动 / 摔了 = 降级**。
+
+#### 监控指标
+
+TensorBoard 里：
+
+```
+Episode/terrain_level_min       ← 最低难度等级
+Episode/terrain_level_mean      ← 平均难度等级
+Episode/terrain_level_max       ← 最高难度等级
+```
+
+**健康轨迹**：mean 从 5 逐步爬升到 7-8（整体在进步）。
+**警报**：mean ≈ min ≈ max → 全部塞在同一难度 → 分布坍塌。
+
+### 16.3 4096 个机器人的物理布局
+
+**关键澄清：所有机器人共享同一个 policy 网络。**
+
+```
+你以为的：
+  4096 个机器人 = 4096 个独立 policy
+  机器人 A 降级 → "A 的 policy" 被换成简单版？❌ 错
+
+实际上：
+  4096 个机器人 = 共享 1 个 policy 网络
+  机器人 A 降级 → "A 站的地形" 被换成简单的 ✓
+```
+
+#### 空间布局
+
+```
+4096 机器人按 64 × 64 方阵排列，env_spacing=2.5m
+总占地约 160m × 160m
+
+ROUGH_TERRAINS_CFG 提供 10 × 20 = 200 块地形（80m × 160m）
+4096 ÷ 200 ≈ 20 个机器人共享一个 8m × 8m 地形块
+机器人在地形块内按 env_spacing 错开位置，不会相撞
+```
+
+#### Policy 的角色
+
+```python
+# 训练主循环（简化）
+for it in range(50000):
+    for step in range(24):
+        actions = policy.act(obs)           # 同一个 policy 处理 4096 obs
+        obs, rewards, dones, infos = env.step(actions)
+        # env.step() 内部对 done=True 的环境：
+        #   - reset 仿真状态
+        #   - 根据表现升降级（teleport 到目标难度的地形块）
+
+    policy.update(buffer)                   # policy 学习
+```
+
+**Policy 在 50000 次迭代中持续学习改进，永远不重置。**
+
+#### 升降级的本质
+
+```
+机器人 #1234 在行 7 摔倒：
+  ↓ env.reset() 触发
+  ↓ 系统找一个行 6（更易）的空位
+  ↓ 把机器人 #1234 瞬移到那个空位
+  ↓ 重置姿态、清零计时器
+
+继续训练，机器人 #1234 现在在行 6 的某个位置
+```
+
+**改变的是机器人的 spawn 位置，不是 policy。**
+
+### 16.4 分布坍塌问题（Distribution Collapse）
+
+#### 问题描述
+
+机器人会聚集在 policy 的"能力边界"上——因为：
+- 能力够 → 升级离开
+- 能力不够 → 降级回来
+- 卡在边界 → 来回震荡
+
+```
+理想分布（均匀覆盖各难度）：
+  行 9:  ████████ 400 个
+  行 5:  ████████ 400 个
+  行 0:  ████████ 400 个
+
+实际可能发生：
+  行 9:  ███ 100 个（policy 还不够强，难升上去）
+  行 8:  ████████████████ 1500 个 ← 全堆在这里！
+  行 0:  ▌ 5 个（早就没人在易地形了）
+```
+
+#### 带来的问题
+
+| 问题 | 后果 |
+|--|--|
+| 易地形数据消失 | policy 慢慢遗忘平地走法（灾难性遗忘） |
+| 数据多样性下降 | PPO 梯度变化方向单一，学习变慢 |
+
+#### TienKung 的缓解措施
+
+1. **5 种地形子类型**：升降级只在行内移动（同列），不换地形类型。同一机器人在"楼梯列"训练，另一机器人在"方块列"训练，自然分散难度
+2. **`max_init_terrain_level=5`**：初始从中等难度开始，给易难度策略保底学习机会
+3. **随机重分配概率**：每次 reset 有概率完全随机分配难度，避免全员困在边界
+
+#### 业界更高级的方法
+
+| 方法 | 描述 |
+|--|--|
+| **Vanilla curriculum**（TienKung 用的） | 靠地形多样性 + 随机性 |
+| **PLR (Prioritized Level Replay)** | 主动平衡各难度采样 |
+| **Adversarial Curriculum** | 用另一个 RL 训"出题老师" |
+| **Generative Curriculum** | 用 GAN 动态生成新难度 |
+
+### 16.5 Curriculum Learning vs Domain Randomization
+
+**TienKung-Lab 同时用了两者，但它们目的完全不同。**
+
+| | Curriculum Learning | Domain Randomization |
+|--|--|--|
+| **核心思想** | 从易到难，分阶段学 | 每次都随机扰动参数 |
+| **解决的问题** | "怎么学会复杂任务" | "怎么让 sim 训的策略能用到真机" |
+| **变化模式** | 有结构、有方向（升难度） | 无结构、纯随机 |
+| **典型对象** | **任务难度**（地形、速度范围） | **环境参数**（摩擦、质量、扰动） |
+| **目标分布** | 收敛到任务难度上限 | 永远保持随机 |
+
+#### 配置项分类对照
+
+| 配置项 | 类型 |
+|--|--|
+| `terrain_generator.curriculum=True` | **Curriculum** |
+| `step_height_range=(0.0, 0.23)` | **Curriculum**（不同行步高不同） |
+| `static_friction_range=(0.6, 1.0)` | **DR** |
+| `mass_distribution_params=(-5.0, 5.0)` | **DR** |
+| `push_robot velocity_range=(-1.0, 1.0)` | **DR** |
+| `pose_range x=(-0.5, 0.5)` | **DR** |
+| `noise_scales` (观测噪声) | **DR** |
+
+**规律**：带 `_range` / `noise` 的是 DR；带 `curriculum` / 难度等级的是 Curriculum。
+
+#### 两者结合的威力
+
+```
+只用 Curriculum：
+  能学会爬最难台阶，但部署到真机时摔倒（不能适应真实摩擦变化）
+
+只用 DR：
+  鲁棒但学不会难任务（一开始就遇到难地形 → 100% 失败 → 学不会）
+
+Curriculum + DR（TienKung 做法）：
+  能学会爬最难台阶 + 能适应真机的不确定性 ✓
+```
+
+#### 业界发展史
+
+```
+2009: Bengio 提出 Curriculum Learning
+       → 解决稀疏奖励，但只在 sim 里 work
+2017: OpenAI 提出 Domain Randomization
+       → 解决 sim2real，sim 训的能用到真机
+2018: OpenAI Dactyl（机械手转方块）
+       → 两者结合，第一次大规模 sim2real 成功
+2022+: 现代腿足机器人项目
+       → curriculum + DR + teacher-student 成为标配
+```
+
+### 16.6 一句话总结
+
+| 概念 | 一句话 |
+|--|--|
+| 观测 vs 奖励 | 高程图是观测扩展，不是新 reward；PPO 自动学会"看地形动" |
+| Curriculum | 从易到难分阶段学；让 policy 能解决难任务 |
+| 4096 机器人共享 policy | 一个大脑同时控制 4096 个身体；升降级改身体所在地形 |
+| 分布坍塌 | 机器人会聚集到能力边界；靠多种地形类型 + 随机性缓解 |
+| DR vs Curriculum | DR 让策略**变稳**（sim2real），Curriculum 让策略**变强**（解难任务） |
+
+---
+
+## 17. 与业界 SOTA 的对比
+
+### 17.1 TienKung-Lab 的方法属于哪个时代
+
+```
+┌──────────────────────────────────────────────────────┐
+│  2020-2022 时代（TienKung-Lab 的方法）                │
+│  ─────────────────────────                            │
+│  • 单阶段 PPO + 域随机化                              │
+│  • height_scanner 直接进策略                          │
+│  • AMP 提供风格                                       │
+│  代表：早期 ANYmal、TienKung-Lab、Walk These Ways    │
+└──────────────────────────────────────────────────────┘
+                       ↓ 演进
+┌──────────────────────────────────────────────────────┐
+│  2023-2024 时代（SOTA）                              │
+│  ─────────────────────────                            │
+│  • 两阶段 Teacher-Student                             │
+│  • Teacher 用特权信息（含高程图）                     │
+│  • Student 只用深度相机 + 本体感知                    │
+│  • Behavior Cloning 蒸馏                              │
+│  代表：Extreme Parkour、ANYmal Parkour、HumanPlus    │
+└──────────────────────────────────────────────────────┘
+                       ↓ 演进
+┌──────────────────────────────────────────────────────┐
+│  2024-2025 时代（前沿研究）                          │
+│  ─────────────────────────                            │
+│  • 大模型驱动（VLA: Vision-Language-Action）         │
+│  • 多技能统一策略                                     │
+│  代表：RoboCat、OpenVLA、DeepMind RT-2               │
+└──────────────────────────────────────────────────────┘
+```
+
+**TienKung-Lab 比早期 PPO 强（用了 AMP + height_scanner），但比 SOTA 弱（没用 teacher-student）。**
+
+### 17.2 Extreme Parkour（CMU 2024）对比
+
+| 维度 | TienKung-Lab | Extreme Parkour |
+|--|--|--|
+| **机器人** | 人形（2 腿） | 四足（ANYmal） |
+| **感知** | 高度扫描器（160 维） | 深度相机（RGB-D 图像） |
+| **训练范式** | 单阶段 PPO + AMP | **两阶段 Teacher-Student** |
+| **风格约束** | AMP 模仿真人动捕 | 无（手写奖励 shaping） |
+| **奖励设计** | 22 项细致奖励 + AMP | 简洁，强调"极限行为" |
+| **目标行为** | 自然走路/跑步 | **极端动作**（跳高/跨沟/翻越） |
+| **指令格式** | 速度向量 (vx, vy, ωz) | 方向 + "extreme" 任务标志 |
+
+### 17.3 Teacher-Student 训练范式
+
+```
+阶段 1（Teacher）：
+   特权观测（含未来地形、精确位姿等真值）→ Teacher 策略
+   → 用 PPO 训练做极限动作
+
+阶段 2（Student）：
+   只有真实可获取的传感器（深度图）→ Student 策略
+   → 用 behavior cloning 模仿 Teacher
+```
+
+**为什么这种方式更强：**
+
+1. **Teacher 看到"未来"**：包含还没踩到的地形信息，相当于"上帝视角"，PPO 能学到"提前蓄力起跳"
+2. **Student 蒸馏简单**：Teacher 已经会做了，BC loss 比从零开始 PPO 收敛快得多
+3. **没有 AMP 的"风格枷锁"**：能学到人类做不到的极端动作（跳跃、翻越）
+
+### 17.4 TienKung 方法的"短板"
+
+#### 短板 1：height_scanner 是"特权信息"
+
+```
+仿真里：       直接读地形真值高度 = 完美 1cm 精度
+真实机器人：   没有这种传感器！
+              只能用 LiDAR 算高度（噪声大）
+              或深度相机 + 算法估计（更不准）
+```
+
+**问题**：sim 训的策略到真机会发现"height_scanner 没了"，策略可能直接失效。
+
+#### 短板 2：单阶段训练效率低
+
+- 直接训"Student"模式（虽然有 height_scanner 帮忙）
+- 缺少 Teacher 阶段的"上帝视角"加速
+
+#### 短板 3：感知能力受限
+
+| | TienKung | SOTA |
+|--|--|--|
+| 数据维度 | 160 维高度值 | 640×480 深度图（甚至 RGB-D） |
+| 范围 | 前方 1.6m × 1.0m | 整个相机视场 |
+| 真实性 | 仿真特权 | 真机可用 |
+
+### 17.5 TienKung 方法的"长板"
+
+#### 长板 1：简单，能跑通
+
+Teacher-Student 实现复杂：
+- 要写两套训练流程
+- 要写 BC（behavior cloning）loss
+- 要协调 Teacher checkpoint 加载
+- 调参翻倍
+
+**TienKung 一个文件就能跑训练**——入门和教学的最佳选择。
+
+#### 长板 2：仿真里效果够好
+
+如果**只在 sim 里展示**（demo 视频、面试 portfolio），方法效果不会比 Teacher-Student 差多少。
+
+差距主要体现在 sim2real（真机部署）。
+
+#### 长板 3：是 SOTA 的"必要前置"
+
+学不会单阶段 PPO，也搞不懂 Teacher-Student。**TienKung 做的就是 SOTA 的基础课**。
+
+### 17.6 面试场景应对模板
+
+**问题模式：技术深度 + 广度**
+
+```
+面试官："你用的是什么 RL 方法？现在 SOTA 是什么？"
+
+回答模板：
+  "我做的是单阶段 PPO + AMP，属于 2022 年代的标准方法。
+   SOTA 是 Teacher-Student（Extreme Parkour 等），核心创新在：
+     1. Teacher 用特权信息训强策略
+     2. Student 蒸馏到只用真机可获取的传感器
+     3. 可以学到 AMP 难以约束的极端动作
+
+   我没用是因为：
+     1. 工作量大 2-3 倍
+     2. 项目只在 sim 里展示，不做 sim2real
+     3. 单阶段 PPO+AMP 是 Teacher 阶段的基础
+
+   下一步会引入 Teacher-Student 升级感知方案。"
+```
+
+### 17.7 关键论文清单
+
+| 论文 | 年份 | 贡献 |
+|--|--|--|
+| **PPO**（Schulman） | 2017 | RL 算法基础 |
+| **GAE**（Schulman） | 2016 | 优势估计 |
+| **Domain Randomization**（OpenAI） | 2017 | Sim2Real 基础 |
+| **AMP**（Peng） | 2021 | 对抗运动先验 |
+| **AMP for Hardware** | 2023 | 真机部署 |
+| **Walking These Ways** (CMU) | 2022 | 多步态切换 |
+| **Extreme Parkour** (CMU) | 2024 | 极限地形 |
+| **DreamWaQ** | 2023 | 盲行走（无地形传感器） |
+| **HoST** | 2025 | 倒地起身 |
+
+**熟读 PPO、AMP、Extreme Parkour 这三篇足以应付大多数面试题。**
 
 ---
 

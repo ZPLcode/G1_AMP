@@ -786,10 +786,17 @@ class TienKungEnv(VecEnv):
             dim=1,
         )
 
-        # ====== 3. 超时检测（达到单回合最大生存步数限制） ======
+        # ====== 3. Root 高度过低检测（防止 policy reward hacking：瘫坐着但禁忌部位不触地） ======
+        # 正常站立 pelvis 在 0.7-0.8m，走路时不应低于 0.4m。
+        # 这个 backup safeguard 强制摔倒后必须 reset，policy 没法学到"瘫坐刷 reward"
+        root_height = self.robot.data.root_pos_w[:, 2]
+        height_too_low = root_height < 0.4
+        reset_buf |= height_too_low
+
+        # ====== 4. 超时检测（达到单回合最大生存步数限制） ======
         time_out_buf = self.episode_length_buf >= self.max_episode_length
 
-        # ====== 4. 合并重置信号（摔倒或超时均触发 Reset） ======
+        # ====== 5. 合并重置信号（摔倒或超时均触发 Reset） ======
         reset_buf |= time_out_buf
 
         # 同时返回总重置标志与超时标志，用于算法端的未来奖励自举（Value Bootstrapping）

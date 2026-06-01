@@ -24,6 +24,7 @@ from legged_lab.envs.tienkung.run_with_sensor_cfg import (
     TienKungRunWithSensorFlatEnvCfg,
 )
 from legged_lab.envs.tienkung.tienkung_env import TienKungEnv
+from legged_lab.envs.g1.g1_env import TienKungG1Env
 from legged_lab.envs.tienkung.walk_cfg import (
     TienKungWalkAgentCfg,
     TienKungWalkFlatEnvCfg,
@@ -32,9 +33,25 @@ from legged_lab.envs.tienkung.walk_ppo_cfg import (
     TienKungWalkPPOAgentCfg,
     TienKungWalkPPOFlatEnvCfg,
 )
+from legged_lab.envs.tienkung.run_ppo_fast_cfg import (
+    TienKungRunPpoFastAgentCfg,
+    TienKungRunPpoFastFlatEnvCfg,
+)
+from legged_lab.envs.g1.walk_ppo_g1_cfg import (
+    TienKungWalkPPOG1AgentCfg,
+    TienKungWalkPPOG1FlatEnvCfg,
+)
+from legged_lab.envs.g1.walk_amp_g1_cfg import (
+    TienKungWalkAMPG1AgentCfg,
+    TienKungWalkAMPG1FlatEnvCfg,
+)
 from legged_lab.envs.tienkung.walk_with_sensor_cfg import (
     TienKungWalkWithSensorAgentCfg,
     TienKungWalkWithSensorFlatEnvCfg,
+)
+from legged_lab.envs.tienkung.walk_terrain_cfg import (
+    TienKungWalkTerrainAgentCfg,
+    TienKungWalkTerrainFlatEnvCfg,
 )
 from legged_lab.utils.task_registry import task_registry
 
@@ -44,7 +61,19 @@ task_registry.register(
 )
 task_registry.register("run", TienKungEnv, TienKungRunFlatEnvCfg(), TienKungRunAgentCfg())
 task_registry.register(
+    "run_ppo_fast", TienKungEnv, TienKungRunPpoFastFlatEnvCfg(), TienKungRunPpoFastAgentCfg()
+)
+task_registry.register(
+    "walk_ppo_g1", TienKungG1Env, TienKungWalkPPOG1FlatEnvCfg(), TienKungWalkPPOG1AgentCfg()
+)
+task_registry.register(
+    "walk_amp_g1", TienKungG1Env, TienKungWalkAMPG1FlatEnvCfg(), TienKungWalkAMPG1AgentCfg()
+)
+task_registry.register(
     "walk_with_sensor", TienKungEnv, TienKungWalkWithSensorFlatEnvCfg(), TienKungWalkWithSensorAgentCfg()
+)
+task_registry.register(
+    "walk_terrain_sensor", TienKungEnv, TienKungWalkTerrainFlatEnvCfg(), TienKungWalkTerrainAgentCfg()
 )
 task_registry.register(
     "run_with_sensor", TienKungEnv, TienKungRunWithSensorFlatEnvCfg(), TienKungRunWithSensorAgentCfg()

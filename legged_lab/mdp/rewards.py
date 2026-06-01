@@ -246,6 +246,22 @@ def joint_deviation_l1(
     return torch.sum(torch.abs(angle), dim=1) * zero_flag
 
 
+def joint_deviation_l1_always(
+    env: BaseEnv | TienKungEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """跟 joint_deviation_l1 一样，但无论速度命令如何都惩罚（去掉 zero_flag 条件）。
+
+    用于 AMP 训练：必须始终约束手臂/腰部不要乱摆，否则 policy 关节范围
+    跟 expert 数据范围差太多 → 判别器靠"看幅度"作弊 → 训练死锁。
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    angle = (
+        asset.data.joint_pos[:, asset_cfg.joint_ids]
+        - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    )
+    return torch.sum(torch.abs(angle), dim=1)
+
+
 def body_orientation_l2(
     env: BaseEnv | TienKungEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:

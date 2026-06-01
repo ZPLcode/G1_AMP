@@ -68,19 +68,19 @@ def play():
     env_cfg, agent_cfg = task_registry.get_cfgs(env_class_name)
 
     # 关闭影响观感的扰动与随机化，以便观察最纯粹的步态姿态
-    env_cfg.noise.add_noise = False                         # 关闭传感器噪声
-    env_cfg.domain_rand.events.push_robot = None            # 关闭突发的推搡扰动
+    env_cfg.noise.add_noise = True                          # [DEBUG] 跟训练一致保留 noise
+    # env_cfg.domain_rand.events.push_robot = None         # [DEBUG] 跟训练一致：保留 push_robot
     env_cfg.scene.max_episode_length_s = 40.0               # 将测试单局最大时长延长至 40 秒
     env_cfg.scene.num_envs = 50                             # 减少并行环境为 50，以保证 GUI 渲染帧率极度丝滑
     env_cfg.scene.env_spacing = 2.5                         # 设置环境间的初始间距
     env_cfg.commands.rel_standing_envs = 0.0                # 测试时所有机器人保持行走，不设置静止个体
-    env_cfg.commands.ranges.lin_vel_x = (1.0, 1.0)          # 强制目标前向线速度为 1.0 m/s
+    env_cfg.commands.ranges.lin_vel_x = (0.5, 0.5)          # 0.5 m/s 慢走
     env_cfg.commands.ranges.lin_vel_y = (0.0, 0.0)          # 强制目标侧向线速度为 0.0 m/s
     env_cfg.scene.height_scanner.drift_range = (0.0, 0.0)   # 消除高度扫描仪的漂移误差
 
-    # 强制将地形设置为平地，方便对基准步态进行评估
-    env_cfg.scene.terrain_generator = None
-    env_cfg.scene.terrain_type = "plane"
+    # [DEBUG] 跟训练一致：保留 GRAVEL_TERRAINS_CFG，不改 plane
+    # env_cfg.scene.terrain_generator = None
+    # env_cfg.scene.terrain_type = "plane"
 
     if env_cfg.scene.terrain_generator is not None:
         env_cfg.scene.terrain_generator.num_rows = 5
@@ -133,10 +133,16 @@ def play():
     obs, _ = env.get_observations()
 
     # ====== 8. 开始纯前向推理大循环 ======
+    _step_counter = 0
     while simulation_app.is_running():
         # inference_mode 块不计算梯度，极大提升推理计算效率
         with torch.inference_mode():
             actions = policy(obs)             # 前向输入观测，得到动作指令
+            if _step_counter < 30:
+                print(f"[DEBUG step {_step_counter}] "
+                      f"proj_grav={obs[0,3:6].cpu().numpy().round(3)}, "
+                      f"|act|.mean={actions.abs().mean().item():.3f}")
+            _step_counter += 1
             obs, _, _, _ = env.step(actions)  # 物理环境应用动作指令并前进一步，反馈新观测
 
 

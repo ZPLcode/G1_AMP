@@ -39,19 +39,31 @@ class AMPLoader:
     """
 
     # ====== AMP 状态的各段维度定义 ======
-    JOINT_POS_SIZE = 20  # 20 个关节的角度
-    JOINT_VEL_SIZE = 20  # 20 个关节的角速度
+    # G1 用 23 关节（左右腿 6+6 + 腰 3 + 左右臂 4+4）+ root body-frame velocity (6)
+    JOINT_POS_SIZE = 23
+    JOINT_VEL_SIZE = 23
     END_EFFECTOR_POS_SIZE = 12  # 4 个末端执行器（手/脚）× 3D坐标
+    BASE_LIN_VEL_SIZE = 3       # root 线速度（body frame）
+    BASE_ANG_VEL_SIZE = 3       # root 角速度（body frame）
 
     # ====== 各段在状态向量中的起止索引 ======
     JOINT_POSE_START_IDX = 0
-    JOINT_POSE_END_IDX = JOINT_POSE_START_IDX + JOINT_POS_SIZE  # = 20
+    JOINT_POSE_END_IDX = JOINT_POSE_START_IDX + JOINT_POS_SIZE  # = 23
 
-    JOINT_VEL_START_IDX = JOINT_POSE_END_IDX  # = 20
-    JOINT_VEL_END_IDX = JOINT_VEL_START_IDX + JOINT_VEL_SIZE  # = 40
+    JOINT_VEL_START_IDX = JOINT_POSE_END_IDX  # = 23
+    JOINT_VEL_END_IDX = JOINT_VEL_START_IDX + JOINT_VEL_SIZE  # = 46
 
-    END_POS_START_IDX = JOINT_VEL_END_IDX  # = 40
-    END_POS_END_IDX = END_POS_START_IDX + END_EFFECTOR_POS_SIZE  # = 52
+    END_POS_START_IDX = JOINT_VEL_END_IDX  # = 46
+    END_POS_END_IDX = END_POS_START_IDX + END_EFFECTOR_POS_SIZE  # = 58
+
+    BASE_LIN_VEL_START_IDX = END_POS_END_IDX  # = 58
+    BASE_LIN_VEL_END_IDX = BASE_LIN_VEL_START_IDX + BASE_LIN_VEL_SIZE  # = 61
+
+    BASE_ANG_VEL_START_IDX = BASE_LIN_VEL_END_IDX  # = 61
+    BASE_ANG_VEL_END_IDX = BASE_ANG_VEL_START_IDX + BASE_ANG_VEL_SIZE  # = 64
+
+    # 整个 AMP obs 的总维度（用于切片）
+    TOTAL_OBS_END_IDX = BASE_ANG_VEL_END_IDX  # = 64
 
     def __init__(
         self,
@@ -105,14 +117,14 @@ class AMPLoader:
                 # 转成 GPU Tensor 存入列表，供后续按帧索引采样
                 self.trajectories.append(
                     torch.tensor(
-                        motion_data[:, : AMPLoader.END_POS_END_IDX],
+                        motion_data[:, : AMPLoader.TOTAL_OBS_END_IDX],
                         dtype=torch.float32,
                         device=device,
                     )
                 )
                 self.trajectories_full.append(
                     torch.tensor(
-                        motion_data[:, : AMPLoader.END_POS_END_IDX],
+                        motion_data[:, : AMPLoader.TOTAL_OBS_END_IDX],
                         dtype=torch.float32,
                         device=device,
                     )
@@ -272,22 +284,22 @@ class AMPLoader:
         )
         all_frame_amp_starts = torch.zeros(
             len(traj_idxs),
-            AMPLoader.END_POS_END_IDX - AMPLoader.JOINT_POSE_START_IDX,
+            AMPLoader.TOTAL_OBS_END_IDX - AMPLoader.JOINT_POSE_START_IDX,
             device=self.device,
         )
         all_frame_amp_ends = torch.zeros(
             len(traj_idxs),
-            AMPLoader.END_POS_END_IDX - AMPLoader.JOINT_POSE_START_IDX,
+            AMPLoader.TOTAL_OBS_END_IDX - AMPLoader.JOINT_POSE_START_IDX,
             device=self.device,
         )
         for traj_idx in set(traj_idxs):
             trajectory = self.trajectories_full[traj_idx]
             traj_mask = traj_idxs == traj_idx
             all_frame_amp_starts[traj_mask] = trajectory[idx_low[traj_mask]][
-                :, AMPLoader.JOINT_POSE_START_IDX : AMPLoader.END_POS_END_IDX
+                :, AMPLoader.JOINT_POSE_START_IDX : AMPLoader.TOTAL_OBS_END_IDX
             ]
             all_frame_amp_ends[traj_mask] = trajectory[idx_high[traj_mask]][
-                :, AMPLoader.JOINT_POSE_START_IDX : AMPLoader.END_POS_END_IDX
+                :, AMPLoader.JOINT_POSE_START_IDX : AMPLoader.TOTAL_OBS_END_IDX
             ]
         blend = torch.tensor(
             p * n - idx_low, device=self.device, dtype=torch.float32
@@ -363,10 +375,10 @@ class AMPLoader:
                 # 快速路径：直接从预采样池中随机取索引，避免实时插值开销
                 idxs = np.random.choice(self.preloaded_s.shape[0], size=mini_batch_size)
                 s = self.preloaded_s[
-                    idxs, AMPLoader.JOINT_POSE_START_IDX : AMPLoader.END_POS_END_IDX
+                    idxs, AMPLoader.JOINT_POSE_START_IDX : AMPLoader.TOTAL_OBS_END_IDX
                 ]
                 s_next = self.preloaded_s_next[
-                    idxs, AMPLoader.JOINT_POSE_START_IDX : AMPLoader.END_POS_END_IDX
+                    idxs, AMPLoader.JOINT_POSE_START_IDX : AMPLoader.TOTAL_OBS_END_IDX
                 ]
             else:
                 # 慢速路径：实时采样时间点并插值，仅在未预加载时使用
