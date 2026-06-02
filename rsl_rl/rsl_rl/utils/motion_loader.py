@@ -189,8 +189,81 @@ class AMPLoader:
             )
             print("Finished preloading")
 
+            # conditional sampling：按动作类型分桶
+            self._classify_expert_frames()
+
         # 将所有轨迹帧拼接为一个大矩阵，便于全局随机访问
         self.all_trajectories_full = torch.vstack(self.trajectories_full)
+
+    def _classify_expert_frames(self):
+        """根据 vx (base_lin_vel_b.x at idx 58) 和 wz (base_ang_vel_b.z at idx 63) 分 5 桶。
+
+        优先级：turn > fwd/back > static
+        每个桶 mutually exclusive。
+        """
+        vx = self.preloaded_s[:, 58]
+        wz = self.preloaded_s[:, 63]
+
+        is_turn = torch.abs(wz) > 0.5
+        is_back = (vx < -0.3) & ~is_turn
+        is_fwd = (vx > 0.3) & ~is_turn
+        is_static = ~(is_turn | is_back | is_fwd)
+
+        # turn 桶按 wz 符号分左右；排除"边倒退边转"（vx < -0.3）
+        # 原因：cmd 大多是 vx>0 + 转弯（前进+转）或 vx≈0（原地转），cmd 倒退+转弯罕见
+        # 防止 cmd 前进+左转时拿到"边倒退边左转"的 expert（vx 矛盾）
+        is_turn_left = is_turn & (wz > 0) & (vx > -0.3)
+        is_turn_right = is_turn & (wz < 0) & (vx > -0.3)
+
+        self.bucket_idx_fwd = is_fwd.nonzero(as_tuple=False).squeeze(-1)
+        self.bucket_idx_back = is_back.nonzero(as_tuple=False).squeeze(-1)
+        self.bucket_idx_turn_left = is_turn_left.nonzero(as_tuple=False).squeeze(-1)
+        self.bucket_idx_turn_right = is_turn_right.nonzero(as_tuple=False).squeeze(-1)
+        self.bucket_idx_static = is_static.nonzero(as_tuple=False).squeeze(-1)
+
+        print(f"[INFO] Expert frames classified (preloaded_s {len(self.preloaded_s)}):")
+        print(f"  fwd:        {len(self.bucket_idx_fwd)}")
+        print(f"  back:       {len(self.bucket_idx_back)}")
+        print(f"  turn_left:  {len(self.bucket_idx_turn_left)}")
+        print(f"  turn_right: {len(self.bucket_idx_turn_right)}")
+        print(f"  static:     {len(self.bucket_idx_static)}")
+
+    def sample_expert_for_cmds(self, cmds):
+        """按 cmd 分类从对应桶选 expert 帧。
+
+        cmds: (batch, 3) = (vx, vy, wz) body frame
+        返回: (s, s_next) shape (batch, obs_dim)
+        """
+        batch = cmds.shape[0]
+        vx = cmds[:, 0]
+        wz = cmds[:, 2]
+
+        is_turn = torch.abs(wz) > 0.5
+        is_turn_left = is_turn & (wz > 0)
+        is_turn_right = is_turn & (wz < 0)
+        is_back = (vx < -0.3) & ~is_turn
+        is_fwd = (vx > 0.3) & ~is_turn
+        is_static = ~(is_turn | is_back | is_fwd)
+
+        sample_idxs = torch.zeros(batch, dtype=torch.long, device=self.device)
+        for cond, bucket in [
+            (is_turn_left, self.bucket_idx_turn_left),
+            (is_turn_right, self.bucket_idx_turn_right),
+            (is_back, self.bucket_idx_back),
+            (is_fwd, self.bucket_idx_fwd),
+            (is_static, self.bucket_idx_static),
+        ]:
+            n = cond.sum().item()
+            if n > 0 and len(bucket) > 0:
+                rand_idxs = torch.randint(0, len(bucket), (n,), device=self.device)
+                sample_idxs[cond] = bucket[rand_idxs]
+            elif n > 0:
+                # fallback 到 fwd 桶
+                rand_idxs = torch.randint(0, len(self.bucket_idx_fwd), (n,), device=self.device)
+                sample_idxs[cond] = self.bucket_idx_fwd[rand_idxs]
+
+        return self.preloaded_s[sample_idxs], self.preloaded_s_next[sample_idxs]
+
 
     def weighted_traj_idx_sample(self):
         """按 MotionWeight 权重随机抽取一条轨迹的索引（单次采样）。"""

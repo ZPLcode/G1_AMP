@@ -252,7 +252,9 @@ class AmpOnPolicyRunner:
                     # 1. 策略前向传播决定动作
                     # [AMP新增] 普通 Runner 只传 act(obs, privileged_obs)
                     # AMP Runner 额外传 amp_obs，让 act() 把它存入 amp_transition 备用
-                    actions = self.alg.act(obs, privileged_obs, amp_obs)
+                    # 取当前 env cmd 传给 alg（用于 conditional sampling）
+                    cmds = self.env.command_generator.command.clone() if hasattr(self.env, 'command_generator') else None
+                    actions = self.alg.act(obs, privileged_obs, amp_obs, cmds=cmds)
                     # 2. 将动作传入物理仿真器前进一步，获取新观测值与重置信号
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
                     # [AMP新增] 获取这一步执行后的 s_{t+1}（52维 AMP 状态），普通 Runner 不需要这行

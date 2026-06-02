@@ -4,6 +4,14 @@
   <statistic meansize="0.144785" extent="1.23314" center="0.025392 2.0634e-05 -0.245975"/>
   <default>
     <joint damping="0.001" armature="0.1" frictionloss="0.1"/>
+    <!-- 严格抄 IsaacLab G1_CFG.actuators 的 stiffness/damping (legged_lab/assets/unitree/unitree.py) -->
+    <!-- mujoco position actuator: torque = kp*(ctrl - q) - kv*qd -->
+    <default class="hip_yr"><position kp="150" kv="5"/></default>      <!-- hip_yaw, hip_roll -->
+    <default class="hip_p_knee_waist"><position kp="200" kv="5"/></default>  <!-- hip_pitch, knee, waist 3 -->
+    <default class="ankle"><position kp="20" kv="2"/></default>
+    <default class="shoulder_pr"><position kp="100" kv="2"/></default>  <!-- shoulder_pitch, shoulder_roll -->
+    <default class="sy_elbow"><position kp="50" kv="2"/></default>      <!-- shoulder_yaw, elbow -->
+    <default class="wrist"><position kp="40" kv="2"/></default>
   </default>
 
   <asset>
@@ -241,35 +249,35 @@
   </worldbody>
 
   <actuator>
-    <motor name="left_hip_pitch_joint" joint="left_hip_pitch_joint"/>
-    <motor name="left_hip_roll_joint" joint="left_hip_roll_joint"/>
-    <motor name="left_hip_yaw_joint" joint="left_hip_yaw_joint"/>
-    <motor name="left_knee_joint" joint="left_knee_joint"/>
-    <motor name="left_ankle_pitch_joint" joint="left_ankle_pitch_joint"/>
-    <motor name="left_ankle_roll_joint" joint="left_ankle_roll_joint"/>
-    <motor name="right_hip_pitch_joint" joint="right_hip_pitch_joint"/>
-    <motor name="right_hip_roll_joint" joint="right_hip_roll_joint"/>
-    <motor name="right_hip_yaw_joint" joint="right_hip_yaw_joint"/>
-    <motor name="right_knee_joint" joint="right_knee_joint"/>
-    <motor name="right_ankle_pitch_joint" joint="right_ankle_pitch_joint"/>
-    <motor name="right_ankle_roll_joint" joint="right_ankle_roll_joint"/>
-    <motor name="waist_yaw_joint" joint="waist_yaw_joint"/>
-    <motor name="waist_roll_joint" joint="waist_roll_joint"/>
-    <motor name="waist_pitch_joint" joint="waist_pitch_joint"/>
-    <motor name="left_shoulder_pitch_joint" joint="left_shoulder_pitch_joint"/>
-    <motor name="left_shoulder_roll_joint" joint="left_shoulder_roll_joint"/>
-    <motor name="left_shoulder_yaw_joint" joint="left_shoulder_yaw_joint"/>
-    <motor name="left_elbow_joint" joint="left_elbow_joint"/>
-    <motor name="left_wrist_roll_joint" joint="left_wrist_roll_joint"/>
-    <motor name="left_wrist_pitch_joint" joint="left_wrist_pitch_joint"/>
-    <motor name="left_wrist_yaw_joint" joint="left_wrist_yaw_joint"/>
-    <motor name="right_shoulder_pitch_joint" joint="right_shoulder_pitch_joint"/>
-    <motor name="right_shoulder_roll_joint" joint="right_shoulder_roll_joint"/>
-    <motor name="right_shoulder_yaw_joint" joint="right_shoulder_yaw_joint"/>
-    <motor name="right_elbow_joint" joint="right_elbow_joint"/>
-    <motor name="right_wrist_roll_joint" joint="right_wrist_roll_joint"/>
-    <motor name="right_wrist_pitch_joint" joint="right_wrist_pitch_joint"/>
-    <motor name="right_wrist_yaw_joint" joint="right_wrist_yaw_joint"/>
+    <position class="hip_p_knee_waist" name="left_hip_pitch_joint"      joint="left_hip_pitch_joint"/>
+    <position class="hip_yr"           name="left_hip_roll_joint"       joint="left_hip_roll_joint"/>
+    <position class="hip_yr"           name="left_hip_yaw_joint"        joint="left_hip_yaw_joint"/>
+    <position class="hip_p_knee_waist" name="left_knee_joint"           joint="left_knee_joint"/>
+    <position class="ankle"            name="left_ankle_pitch_joint"    joint="left_ankle_pitch_joint"/>
+    <position class="ankle"            name="left_ankle_roll_joint"     joint="left_ankle_roll_joint"/>
+    <position class="hip_p_knee_waist" name="right_hip_pitch_joint"     joint="right_hip_pitch_joint"/>
+    <position class="hip_yr"           name="right_hip_roll_joint"      joint="right_hip_roll_joint"/>
+    <position class="hip_yr"           name="right_hip_yaw_joint"       joint="right_hip_yaw_joint"/>
+    <position class="hip_p_knee_waist" name="right_knee_joint"          joint="right_knee_joint"/>
+    <position class="ankle"            name="right_ankle_pitch_joint"   joint="right_ankle_pitch_joint"/>
+    <position class="ankle"            name="right_ankle_roll_joint"    joint="right_ankle_roll_joint"/>
+    <position class="hip_p_knee_waist" name="waist_yaw_joint"           joint="waist_yaw_joint"/>
+    <position class="hip_p_knee_waist" name="waist_roll_joint"          joint="waist_roll_joint"/>
+    <position class="hip_p_knee_waist" name="waist_pitch_joint"         joint="waist_pitch_joint"/>
+    <position class="shoulder_pr"      name="left_shoulder_pitch_joint" joint="left_shoulder_pitch_joint"/>
+    <position class="shoulder_pr"      name="left_shoulder_roll_joint"  joint="left_shoulder_roll_joint"/>
+    <position class="sy_elbow"         name="left_shoulder_yaw_joint"   joint="left_shoulder_yaw_joint"/>
+    <position class="sy_elbow"         name="left_elbow_joint"          joint="left_elbow_joint"/>
+    <position class="wrist"            name="left_wrist_roll_joint"     joint="left_wrist_roll_joint"/>
+    <position class="wrist"            name="left_wrist_pitch_joint"    joint="left_wrist_pitch_joint"/>
+    <position class="wrist"            name="left_wrist_yaw_joint"      joint="left_wrist_yaw_joint"/>
+    <position class="shoulder_pr"      name="right_shoulder_pitch_joint" joint="right_shoulder_pitch_joint"/>
+    <position class="shoulder_pr"      name="right_shoulder_roll_joint"  joint="right_shoulder_roll_joint"/>
+    <position class="sy_elbow"         name="right_shoulder_yaw_joint"   joint="right_shoulder_yaw_joint"/>
+    <position class="sy_elbow"         name="right_elbow_joint"          joint="right_elbow_joint"/>
+    <position class="wrist"            name="right_wrist_roll_joint"     joint="right_wrist_roll_joint"/>
+    <position class="wrist"            name="right_wrist_pitch_joint"    joint="right_wrist_pitch_joint"/>
+    <position class="wrist"            name="right_wrist_yaw_joint"      joint="right_wrist_yaw_joint"/>
   </actuator>
 
   <sensor>

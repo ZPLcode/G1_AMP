@@ -29,45 +29,48 @@ class ReplayBuffer:
     - 混入历史各阶段策略数据，防止判别器因训练分布突变而震荡
     """
 
-    def __init__(self, obs_dim, buffer_size, device):
-        # obs_dim：单帧 AMP 状态维度（52维），buffer 存 s_t 和 s_{t+1} 各一份
-        # buffer_size：最大容量，默认 100000 条（约 40MB GPU 显存）
-        self.states = torch.zeros(buffer_size, obs_dim).to(device)       # s_t
-        self.next_states = torch.zeros(buffer_size, obs_dim).to(device)  # s_{t+1}
+    def __init__(self, obs_dim, buffer_size, device, cmd_dim=3):
+        self.states = torch.zeros(buffer_size, obs_dim).to(device)
+        self.next_states = torch.zeros(buffer_size, obs_dim).to(device)
+        self.cmds = torch.zeros(buffer_size, cmd_dim).to(device)
         self.buffer_size = buffer_size
         self.device = device
+        self.step = 0
+        self.num_samples = 0
 
-        self.step = 0         # 下一次写入的起始位置指针（循环覆盖）
-        self.num_samples = 0  # 当前已写入的有效样本数（满之前 < buffer_size）
-
-    def insert(self, states, next_states):
-        """将新的状态转移批量写入缓存，满后从头循环覆盖最旧数据。
-
-        每次 process_env_step 调用一次，写入量 = num_envs（4096条）。
-        """
+    def insert(self, states, next_states, cmds=None):
         num_states = states.shape[0]
         start_idx = self.step
         end_idx = self.step + num_states
-
+        if cmds is None:
+            cmds = torch.zeros(num_states, self.cmds.shape[1], device=states.device)
         if end_idx > self.buffer_size:
-            # 写入会超出末尾，分两段写：先写到 buffer 末尾，剩余部分从头覆盖
-            self.states[self.step : self.buffer_size] = states[: self.buffer_size - self.step]
-            self.next_states[self.step : self.buffer_size] = next_states[: self.buffer_size - self.step]
-            self.states[: end_idx - self.buffer_size] = states[self.buffer_size - self.step :]
-            self.next_states[: end_idx - self.buffer_size] = next_states[self.buffer_size - self.step :]
+            wrap = self.buffer_size - self.step
+            self.states[self.step : self.buffer_size] = states[:wrap]
+            self.next_states[self.step : self.buffer_size] = next_states[:wrap]
+            self.cmds[self.step : self.buffer_size] = cmds[:wrap]
+            self.states[: end_idx - self.buffer_size] = states[wrap:]
+            self.next_states[: end_idx - self.buffer_size] = next_states[wrap:]
+            self.cmds[: end_idx - self.buffer_size] = cmds[wrap:]
         else:
-            # 未溢出，直接顺序写入
             self.states[start_idx:end_idx] = states
             self.next_states[start_idx:end_idx] = next_states
-
-        # 有效样本数：满了封顶在 buffer_size，否则取 end_idx 和历史最大值中的较大者
+            self.cmds[start_idx:end_idx] = cmds
         self.num_samples = min(self.buffer_size, max(end_idx, self.num_samples))
-        # 指针循环推进
         self.step = (self.step + num_states) % self.buffer_size
 
     def feed_forward_generator(self, num_mini_batch, mini_batch_size):
-        """随机有放回采样，生成 num_mini_batch 个 mini-batch，供判别器训练使用。"""
+        """vanilla：返回 (s, s_next)。"""
         for _ in range(num_mini_batch):
-            # 从已有的有效样本中随机抽取（有放回），不保证时序连续
             sample_idxs = np.random.choice(self.num_samples, size=mini_batch_size)
             yield (self.states[sample_idxs].to(self.device), self.next_states[sample_idxs].to(self.device))
+
+    def feed_forward_generator_with_cmds(self, num_mini_batch, mini_batch_size):
+        """conditional：返回 (s, s_next, cmds)。"""
+        for _ in range(num_mini_batch):
+            sample_idxs = np.random.choice(self.num_samples, size=mini_batch_size)
+            yield (
+                self.states[sample_idxs].to(self.device),
+                self.next_states[sample_idxs].to(self.device),
+                self.cmds[sample_idxs].to(self.device),
+            )

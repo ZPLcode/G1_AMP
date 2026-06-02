@@ -70,17 +70,17 @@ def play():
     # 关闭影响观感的扰动与随机化，以便观察最纯粹的步态姿态
     env_cfg.noise.add_noise = True                          # [DEBUG] 跟训练一致保留 noise
     # env_cfg.domain_rand.events.push_robot = None         # [DEBUG] 跟训练一致：保留 push_robot
-    env_cfg.scene.max_episode_length_s = 40.0               # 将测试单局最大时长延长至 40 秒
+    env_cfg.scene.max_episode_length_s = 10.0               # 将测试单局最大时长延长至 40 秒
     env_cfg.scene.num_envs = 50                             # 减少并行环境为 50，以保证 GUI 渲染帧率极度丝滑
     env_cfg.scene.env_spacing = 2.5                         # 设置环境间的初始间距
     env_cfg.commands.rel_standing_envs = 0.0                # 测试时所有机器人保持行走，不设置静止个体
-    env_cfg.commands.ranges.lin_vel_x = (0.5, 0.5)          # 0.5 m/s 慢走
+    env_cfg.commands.ranges.lin_vel_x = (0.5, 0.5)          # 0.5 m/s（接近训练 command 分布 mean）
     env_cfg.commands.ranges.lin_vel_y = (0.0, 0.0)          # 强制目标侧向线速度为 0.0 m/s
     env_cfg.scene.height_scanner.drift_range = (0.0, 0.0)   # 消除高度扫描仪的漂移误差
 
     # [DEBUG] 跟训练一致：保留 GRAVEL_TERRAINS_CFG，不改 plane
-    # env_cfg.scene.terrain_generator = None
-    # env_cfg.scene.terrain_type = "plane"
+    env_cfg.scene.terrain_generator = None
+    env_cfg.scene.terrain_type = "plane"
 
     if env_cfg.scene.terrain_generator is not None:
         env_cfg.scene.terrain_generator.num_rows = 5
@@ -96,9 +96,21 @@ def play():
     agent_cfg = update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.seed = agent_cfg.seed
 
+    # play 时关 RSI，让 G1 从 default pose 起步（避免 spawn 在 expert 中段）
+    env_cfg.rsi_enable = False
+    env_cfg.rsi_prob = 0.0
+
     # ====== 4. 实例化环境 ======
     env_class = task_registry.get_task_class(env_class_name)
     env = env_class(env_cfg, args_cli.headless)
+
+    # [DEBUG] 打印 robot 实际 joint_names 顺序（用于 sim2sim joint mapping 验证）
+    joint_names = env.robot.data.joint_names
+    print(f"\n[DEBUG] G1 joint count: {len(joint_names)}")
+    print("[DEBUG] joint_names (Isaac order, used by policy obs):")
+    for i, n in enumerate(joint_names):
+        print(f"  {i:2d}: {n}")
+    print()
 
     # ====== 5. 加载已保存的 Checkpoint 权重 ======
     log_root_path = os.path.join("logs", agent_cfg.experiment_name)
@@ -138,10 +150,22 @@ def play():
         # inference_mode 块不计算梯度，极大提升推理计算效率
         with torch.inference_mode():
             actions = policy(obs)             # 前向输入观测，得到动作指令
-            if _step_counter < 30:
-                print(f"[DEBUG step {_step_counter}] "
-                      f"proj_grav={obs[0,3:6].cpu().numpy().round(3)}, "
-                      f"|act|.mean={actions.abs().mean().item():.3f}")
+            # [DEBUG-SIM2SIM] 第一帧 dump 最新一帧 obs（最后 102 维）+ action
+            # 用于跟 sim2sim_g1.py get_obs 的输出对比
+            if _step_counter == 0:
+                latest = obs[0, -102:].cpu().numpy()
+                print("\n[DEBUG-SIM2SIM] first frame obs breakdown (102 dim):")
+                print(f"  ang_vel    [0:3]   = {latest[0:3].round(3)}")
+                print(f"  proj_grav  [3:6]   = {latest[3:6].round(3)}")
+                print(f"  cmd        [6:9]   = {latest[6:9].round(3)}")
+                print(f"  dof_pos_rel[9:38]  = {latest[9:38].round(3)}")
+                print(f"  dof_vel    [38:67] = {latest[38:67].round(3)}")
+                print(f"  last_act   [67:96] = {latest[67:96].round(3)}")
+                print(f"  sin_phase  [96:98] = {latest[96:98].round(3)}")
+                print(f"  cos_phase  [98:100]= {latest[98:100].round(3)}")
+                print(f"  phase_rat [100:102]= {latest[100:102].round(3)}")
+                print(f"  action.first = {actions[0].cpu().numpy().round(3)}")
+                print()
             _step_counter += 1
             obs, _, _, _ = env.step(actions)  # 物理环境应用动作指令并前进一步，反馈新观测
 

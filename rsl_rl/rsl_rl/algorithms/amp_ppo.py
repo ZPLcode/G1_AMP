@@ -198,7 +198,7 @@ class AMPPPO:
             self.device,
         )
 
-    def act(self, obs, critic_obs, amp_obs):
+    def act(self, obs, critic_obs, amp_obs, cmds=None):
         if self.policy.is_recurrent:
             self.transition.hidden_states = self.policy.get_hidden_states()
         # compute the actions and values
@@ -212,9 +212,9 @@ class AMPPPO:
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
         self.transition.privileged_observations = critic_obs
-        # [AMP新增] 记录这一步的 AMP 状态（52维），用于后续存入 ReplayBuffer
-        # 普通 PPO 的 act() 没有这一行
+        # [AMP] 记录 amp_obs + cmd（用于 conditional sampling）
         self.amp_transition.observations = amp_obs
+        self.amp_transition.cmds = cmds
         return self.transition.actions
 
     def process_env_step(self, rewards, dones, infos, amp_obs):
@@ -243,11 +243,8 @@ class AMPPPO:
                 1,
             )
 
-        # [AMP新增] 将当前步的 (s_t, s_{t+1}) 存入 AMP ReplayBuffer
-        # s_t = amp_transition.observations（act()时记录）
-        # s_{t+1} = amp_obs（本步执行后的新 AMP 状态）
-        # 普通 PPO 的 process_env_step() 没有这一行
-        self.amp_storage.insert(self.amp_transition.observations, amp_obs)
+        # [AMP] 把当前 (s_t, s_{t+1}, cmd) 存进 AMP ReplayBuffer
+        self.amp_storage.insert(self.amp_transition.observations, amp_obs, self.amp_transition.cmds)
         self.storage.add_transitions(self.transition)
         self.transition.clear()
         self.amp_transition.clear()
@@ -300,16 +297,8 @@ class AMPPPO:
                 self.num_mini_batches, self.num_learning_epochs
             )
 
-        # 策略回放 generator：从 ReplayBuffer 随机采样策略历史状态转移 (s_t, s_{t+1})
-        # 总迭代次数 = num_epochs × num_mini_batches，batch_size = num_envs × num_steps // num_mini_batches
-        amp_policy_generator = self.amp_storage.feed_forward_generator(
-            self.num_learning_epochs * self.num_mini_batches,
-            self.storage.num_envs
-            * self.storage.num_transitions_per_env
-            // self.num_mini_batches,
-        )
-        # 专家数据 generator：从 AMPLoader 随机采样专家动捕状态转移 (s_t, s_{t+1})
-        amp_expert_generator = self.amp_data.feed_forward_generator(
+        # [conditional sampling] policy 用 with_cmds 拿 cmd；expert 按 cmd 选桶
+        amp_policy_generator = self.amp_storage.feed_forward_generator_with_cmds(
             self.num_learning_epochs * self.num_mini_batches,
             self.storage.num_envs
             * self.storage.num_transitions_per_env
@@ -317,9 +306,7 @@ class AMPPPO:
         )
 
         # ====== 3. 循环遍历 Mini-Batch 进行更新 ======
-        for sample, sample_amp_policy, sample_amp_expert in zip(
-            generator, amp_policy_generator, amp_expert_generator
-        ):
+        for sample, sample_amp_policy in zip(generator, amp_policy_generator):
             (
                 obs_batch,
                 critic_obs_batch,
@@ -504,17 +491,16 @@ class AMPPPO:
                 mseloss = torch.nn.MSELoss()
                 rnd_loss = mseloss(predicted_embedding, target_embedding)
 
-            # ====== 3.10 [AMP新增] 判别器损失计算 ======
-            # 以下是 AMP-PPO 相比普通 PPO 最核心的额外逻辑
-            # sample_amp_policy: 从 ReplayBuffer 取的策略历史状态转移 (s_t, s_{t+1})
-            # sample_amp_expert: 从 AMPLoader 取的专家动捕状态转移 (s_t, s_{t+1})
-            policy_state, policy_next_state = sample_amp_policy
-            expert_state, expert_next_state = sample_amp_expert
+            # ====== 3.10 [AMP conditional sampling] 判别器损失计算 ======
+            # policy 端：拿 (s_t, s_{t+1}, cmd)
+            policy_state, policy_next_state, policy_cmds = sample_amp_policy
+            # expert 端：按 policy 的 cmd 选匹配桶的 expert（前进/倒退/左转/右转/静止）
+            expert_state, expert_next_state = self.amp_data.sample_expert_for_cmds(policy_cmds)
 
-            # 保留 raw 数据用于后面 update normalizer（关键 fix：必须用 raw 数据更新统计量，
-            # 否则 normalizer 会退化成恒等函数 — 见本函数末尾的 update 调用）
+            # 保留 raw 数据用于：normalizer.update（必须 raw）+ grad_pen（用 raw expert）
             raw_policy_state = policy_state.clone()
             raw_expert_state = expert_state.clone()
+            raw_expert_next_state = expert_next_state.clone()
 
             # 3.10.1 对 AMP 状态做在线均值-方差归一化
             # 注意：用 no_grad 因为归一化参数不参与梯度计算
@@ -582,8 +568,9 @@ class AMPPPO:
             #   结论：默认 λ=10 在简单任务下已是合理选择
             #   详见 docs/amp_ppo_training_pipeline.md §15
             # 已恢复默认值 λ=10
+            # grad_pen 用 raw expert（normalize 前的，跟原代码一致）
             grad_pen_loss = self.discriminator.compute_grad_pen(
-                *sample_amp_expert, lambda_=10
+                raw_expert_state, raw_expert_next_state, lambda_=10
             )
 
             # 3.10.5 将判别器损失并入总 Loss

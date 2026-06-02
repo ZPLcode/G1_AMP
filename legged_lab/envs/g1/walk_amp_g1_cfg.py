@@ -113,13 +113,18 @@ class TienKungWalkAMPG1FlatEnvCfg(TienKungWalkPPOG1FlatEnvCfg):
         # ---- 去掉手指惩罚（新资产没手指） ----
         self.reward.joint_deviation_fingers = None
 
-        # ====== AMP 训练特化的 reward 调整（对齐 G1DWAQ_Lab 参考） ======
+        # ====== AMP 训练特化（Y 路线：TienKung-style + LAFAN1 节奏对齐） ======
 
-        # 1. gait 时钟权重降 10×：弱化 TienKung 的步态时钟约束，让 AMP 主导节奏
-        #    （TienKung 的 0.85s 周期是给 TienKung 调的，G1 自然周期不同）
-        self.reward.gait_feet_frc_perio.weight = 0.1
-        self.reward.gait_feet_spd_perio.weight = 0.1
-        self.reward.gait_feet_frc_support_perio.weight = 0.06
+        # 1. 完全去掉 gait 时钟 reward（避免跟 AMP 节奏冲突，让 AMP 主导步频）
+        self.reward.gait_feet_frc_perio = None
+        self.reward.gait_feet_spd_perio = None
+        self.reward.gait_feet_frc_support_perio = None
+
+        # 2. 删除 feet_y_distance：hardcoded 0.299m 是 TienKung 髋宽，G1 ~0.2m 不匹配
+        self.reward.feet_y_distance = None
+
+        # 3. 降 action_rate_l2 让 policy 敢做更大动作变化（转弯/复杂步态需要）
+        self.reward.action_rate_l2.weight = -0.005    # 从 -0.01 减半
 
         # 2. 加 fly：禁止双脚同时离地（防止 G1 用"小跳"前进）
         self.reward.fly = RewTerm(
@@ -162,7 +167,7 @@ class TienKungWalkAMPG1AgentCfg(RslRlOnPolicyRunnerCfg):
     device = "cuda:0"
     num_steps_per_env = 24
     max_iterations = 50000
-    empirical_normalization = False
+    empirical_normalization = True    # 开启 actor/critic obs running mean/var 归一化，让 PPO 训练更稳
 
     policy = RslRlPpoActorCriticCfg(
         class_name="ActorCritic",
@@ -215,6 +220,6 @@ class TienKungWalkAMPG1AgentCfg(RslRlOnPolicyRunnerCfg):
         "legged_lab/envs/g1/datasets/g1_lafan_walk.txt",
     ]
     amp_num_preload_transitions = 100000
-    amp_task_reward_lerp = 0.3            # 30% AMP + 70% task，让 task reward 主导（之前 0.7 倒过来 AMP 过重）
+    amp_task_reward_lerp = 0.7            # 70% task + 30% AMP（task 主导，跟 TienKung walk 一致）
     amp_discr_hidden_dims = [1024, 512, 256]
     min_normalized_std = [0.05] * 23      # 动作标准差下界（23 = AMP 关节子集，含 waist）

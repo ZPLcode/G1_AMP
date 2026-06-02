@@ -7,3 +7,9 @@ run_bash.sh
 wandb
 MUJOCO_LOG.TXT
 .history
+
+# 参考仓库（学习用，不入库）
+amp_for_g1/
+AMP_for_hardware/
+unitree_rl_lab/
+GMR/
