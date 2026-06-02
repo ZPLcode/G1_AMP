@@ -2,18 +2,9 @@
 # All rights reserved.
 # Licensed under BSD-3-Clause.
 
-"""
-Sim2Sim: 把 IsaacLab 训好的 G1 AMP policy 部署到 Mujoco 看是否能走。
+"""Sim2Sim: deploy IsaacLab-trained G1 AMP policy to Mujoco.
 
-链路:
-  mujoco state -> obs(102 维 × history 10 = 1020) -> policy -> action(29 维)
-  -> target_dof_pos -> mujoco position actuator 内置 PD -> motor torque -> 关节
-
-PD 在 xml 里 (legged_lab/assets/unitree/g1/mjcf/g1_29dof_rev_1_0_daf.xml 的
-<position class="..."/> actuator)，kp/kv 严格对齐 IsaacLab G1_CFG.actuators，
-sim2sim 只需把 target_dof_pos 写到 data.ctrl[:]。
-
-用法:
+Usage:
     python legged_lab/scripts/sim2sim_g1.py \\
         --policy logs/walk_amp_g1/<run_dir>/exported/policy.pt
 """
@@ -30,11 +21,6 @@ import numpy as np
 import torch
 
 
-# ==============================================================
-# 关节顺序
-# ==============================================================
-
-# Mujoco G1 joint 顺序（按 xml 里 <joint> 出现顺序，即 qpos[7:36] 顺序）
 MUJOCO_JOINT_ORDER = [
     "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
     "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
@@ -49,7 +35,6 @@ MUJOCO_JOINT_ORDER = [
     "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
 ]
 
-# IsaacLab G1_CFG joint 顺序（policy 看到的顺序，按 USD 层级深度优先）
 ISAAC_JOINT_ORDER = [
     "left_hip_pitch_joint", "right_hip_pitch_joint", "waist_yaw_joint",
     "left_hip_roll_joint", "right_hip_roll_joint", "waist_roll_joint",
@@ -70,11 +55,7 @@ ISAAC_TO_MUJOCO_IDX = [ISAAC_JOINT_ORDER.index(n) for n in MUJOCO_JOINT_ORDER]
 MUJOCO_TO_ISAAC_IDX = [MUJOCO_JOINT_ORDER.index(n) for n in ISAAC_JOINT_ORDER]
 
 
-# ==============================================================
-# G1 default joint pos（IsaacLab 顺序）
-# ==============================================================
 def _build_default_dof_pos():
-    """跟 G1_CFG.init_state.joint_pos 一致，其他关节 default 0。"""
     defaults = {
         "left_hip_pitch_joint": -0.20, "right_hip_pitch_joint": -0.20,
         "left_knee_joint": 0.42, "right_knee_joint": 0.42,
@@ -86,16 +67,12 @@ def _build_default_dof_pos():
     return np.array([defaults.get(n, 0.0) for n in ISAAC_JOINT_ORDER], dtype=np.float32)
 
 
-# ==============================================================
-# Config
-# ==============================================================
 class SimToSimCfg:
     class sim:
         sim_duration = 60.0
         num_action = 29
-        num_obs_per_step = 102  # ang_vel(3)+grav(3)+cmd(3)+dof_pos(29)+dof_vel(29)+action(29)+gait(6)
+        num_obs_per_step = 102
         actor_obs_history_length = 10
-        # 与 IsaacLab 训练 SimCfg 一致：200Hz 物理 + 50Hz 控制
         dt = 0.005
         decimation = 4
         clip_observations = 100.0
@@ -103,7 +80,6 @@ class SimToSimCfg:
         action_scale = 0.25
 
     class robot:
-        # 跟 IsaacLab GaitCfg 一致（0.85s 周期）
         gait_air_ratio_l = 0.38
         gait_air_ratio_r = 0.38
         gait_phase_offset_l = 0.38
@@ -111,9 +87,6 @@ class SimToSimCfg:
         gait_cycle = 0.85
 
 
-# ==============================================================
-# Mujoco runner
-# ==============================================================
 class MujocoG1Runner:
     def __init__(self, cfg, policy_path, model_path):
         self.cfg = cfg
@@ -121,14 +94,13 @@ class MujocoG1Runner:
         self.model.opt.timestep = cfg.sim.dt
         self.data = mujoco.MjData(self.model)
 
-        # 校验 actuator 顺序匹配 MUJOCO_JOINT_ORDER
         n_act = self.model.nu
         for i in range(n_act):
             jnt_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)
             assert jnt_name == MUJOCO_JOINT_ORDER[i], (
                 f"Actuator {i}={jnt_name}, expected {MUJOCO_JOINT_ORDER[i]}"
             )
-        print(f"[INFO] {n_act} position actuators loaded, joint order verified ✓")
+        print(f"[INFO] {n_act} position actuators loaded, joint order verified")
 
         self.policy = torch.jit.load(policy_path)
         self.policy.eval()
@@ -137,15 +109,13 @@ class MujocoG1Runner:
         self.viewer = mujoco_viewer.MujocoViewer(self.model, self.data)
         self.viewer._render_every_frame = False
 
-        # ---- 状态变量 ----
         self.dt = cfg.sim.decimation * cfg.sim.dt
-        self.dof_pos = np.zeros(cfg.sim.num_action, dtype=np.float32)   # Isaac 顺序
+        self.dof_pos = np.zeros(cfg.sim.num_action, dtype=np.float32)
         self.dof_vel = np.zeros(cfg.sim.num_action, dtype=np.float32)
         self.action = np.zeros(cfg.sim.num_action, dtype=np.float32)
-        self.default_dof_pos = _build_default_dof_pos()                  # Isaac 顺序
+        self.default_dof_pos = _build_default_dof_pos()
         self.episode_length_buf = 0
 
-        # gait 时钟
         self.gait_phase = np.zeros(2, dtype=np.float32)
         self.phase_ratio = np.array(
             [cfg.robot.gait_air_ratio_l, cfg.robot.gait_air_ratio_r], dtype=np.float32
@@ -154,15 +124,12 @@ class MujocoG1Runner:
             [cfg.robot.gait_phase_offset_l, cfg.robot.gait_phase_offset_r], dtype=np.float32
         )
 
-        # 命令速度（默认 0；W/S/A/D/Q/E 改，SPACE 清零）
         self.command_vel = np.zeros(3, dtype=np.float32)
 
-        # obs history buffer (oldest first, newest last)
         self.obs_history = np.zeros(
             cfg.sim.num_obs_per_step * cfg.sim.actor_obs_history_length, dtype=np.float32
         )
 
-        # 初始化 robot 站姿（写 mujoco 顺序的 default pose）
         default_mujoco = self.default_dof_pos[ISAAC_TO_MUJOCO_IDX]
         self.data.qpos[0:3] = [0.0, 0.0, 0.80]
         self.data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
@@ -170,33 +137,29 @@ class MujocoG1Runner:
         self.data.qvel[:] = 0
         mujoco.mj_forward(self.model, self.data)
 
-    # ---------- obs 计算 ----------
     def get_obs(self):
         qpos_mujoco = self.data.qpos[7:36].copy()
         qvel_mujoco = self.data.qvel[6:35].copy()
         self.dof_pos = qpos_mujoco[MUJOCO_TO_ISAAC_IDX].astype(np.float32)
         self.dof_vel = qvel_mujoco[MUJOCO_TO_ISAAC_IDX].astype(np.float32)
 
-        # IMU 从 root free joint 读: qvel[3:6] = body-frame angular vel, qpos[3:7] = quat(wxyz)
         ang_vel = self.data.qvel[3:6].astype(np.float32)
         quat_wxyz = self.data.qpos[3:7].astype(np.float32)
         quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]])
         proj_grav = self.quat_rotate_inverse(quat_xyzw, np.array([0.0, 0.0, -1.0]))
 
-        # 拼成 102 维单步 obs（跟 TienKungEnv.compute_current_observations 一致）
         obs = np.concatenate([
-            ang_vel,                                          # [0:3]
-            proj_grav,                                        # [3:6]
-            self.command_vel,                                 # [6:9]
-            self.dof_pos - self.default_dof_pos,              # [9:38]
-            self.dof_vel,                                     # [38:67]
-            np.clip(self.action, -self.cfg.sim.clip_actions, self.cfg.sim.clip_actions),  # [67:96]
-            np.sin(2 * np.pi * self.gait_phase),              # [96:98]
-            np.cos(2 * np.pi * self.gait_phase),              # [98:100]
-            self.phase_ratio,                                 # [100:102]
+            ang_vel,
+            proj_grav,
+            self.command_vel,
+            self.dof_pos - self.default_dof_pos,
+            self.dof_vel,
+            np.clip(self.action, -self.cfg.sim.clip_actions, self.cfg.sim.clip_actions),
+            np.sin(2 * np.pi * self.gait_phase),
+            np.cos(2 * np.pi * self.gait_phase),
+            self.phase_ratio,
         ]).astype(np.float32)
 
-        # history rolling：最旧的在前，最新的在尾
         self.obs_history = np.roll(self.obs_history, -self.cfg.sim.num_obs_per_step)
         self.obs_history[-self.cfg.sim.num_obs_per_step:] = obs
 
@@ -206,7 +169,6 @@ class MujocoG1Runner:
         target_pos = self.action * self.cfg.sim.action_scale + self.default_dof_pos
         return target_pos[ISAAC_TO_MUJOCO_IDX].astype(np.float32)
 
-    # ---------- 主循环 ----------
     def run(self):
         self.setup_keyboard_listener()
 
@@ -216,13 +178,11 @@ class MujocoG1Runner:
         while self.data.time < self.cfg.sim.sim_duration:
             step_start = time.time()
 
-            # 每物理步：把 target 写给 position actuator (mujoco 内部 PD 算 torque)
             self.data.ctrl[:] = target_dof_pos
             mujoco.mj_step(self.model, self.data)
             self.viewer.render()
 
             counter += 1
-            # 每 decimation 步：跑 policy 更新 target
             if counter % self.cfg.sim.decimation == 0:
                 obs = self.get_obs()
                 with torch.inference_mode():
@@ -240,7 +200,6 @@ class MujocoG1Runner:
 
         self.viewer.close()
 
-    # ---------- utils ----------
     @staticmethod
     def quat_rotate_inverse(q_xyzw, v):
         q_w = q_xyzw[-1]
