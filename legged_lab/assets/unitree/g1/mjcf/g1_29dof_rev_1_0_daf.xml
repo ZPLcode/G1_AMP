@@ -3,7 +3,7 @@
 
   <statistic meansize="0.144785" extent="1.23314" center="0.025392 2.0634e-05 -0.245975"/>
   <default>
-    <joint damping="0.001" armature="0.1" frictionloss="0.1"/>
+    <joint damping="0.001" armature="0.01" frictionloss="0.1"/>
     <!-- 严格抄 IsaacLab G1_CFG.actuators 的 stiffness/damping (legged_lab/assets/unitree/unitree.py) -->
     <!-- mujoco position actuator: torque = kp*(ctrl - q) - kv*qd -->
     <default class="hip_yr"><position kp="150" kv="5"/></default>      <!-- hip_yaw, hip_roll -->

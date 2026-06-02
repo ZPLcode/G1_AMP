@@ -76,9 +76,10 @@ class TienKungWalkAMPG1FlatEnvCfg(TienKungWalkPPOG1FlatEnvCfg):
             },
         )
         # ---- joint_deviation_arms：去掉 elbow_roll（新资产没有） ----
+        # weight 从 -0.2 提到 -0.5（之前训练发现 joint_deviation_arms 累积大 -0.065，手臂偏 default 远）
         self.reward.joint_deviation_arms = RewTerm(
             func=mdp.joint_deviation_l1,
-            weight=-0.2,
+            weight=-0.5,
             params={
                 "asset_cfg": SceneEntityCfg(
                     "robot",
@@ -123,8 +124,8 @@ class TienKungWalkAMPG1FlatEnvCfg(TienKungWalkPPOG1FlatEnvCfg):
         # 2. 删除 feet_y_distance：hardcoded 0.299m 是 TienKung 髋宽，G1 ~0.2m 不匹配
         self.reward.feet_y_distance = None
 
-        # 3. 降 action_rate_l2 让 policy 敢做更大动作变化（转弯/复杂步态需要）
-        self.reward.action_rate_l2.weight = -0.005    # 从 -0.01 减半
+        # 3. action_rate_l2 加回 -0.01（之前减半到 -0.005 导致 action 抖动太大，sim2sim 跟不上）
+        self.reward.action_rate_l2.weight = -0.01
 
         # 2. 加 fly：禁止双脚同时离地（防止 G1 用"小跳"前进）
         self.reward.fly = RewTerm(
@@ -146,11 +147,11 @@ class TienKungWalkAMPG1FlatEnvCfg(TienKungWalkPPOG1FlatEnvCfg):
             },
         )
 
-        # 4. 加 arm_joint_vel_l2：惩罚手臂关节速度（防止手臂高频抖动）
-        #    expert 数据手臂动作温和，policy 手臂乱抖会让 dof_vel 量级跟 expert 差太多
+        # 4. arm_joint_vel_l2：惩罚手臂关节速度（防手臂高频抖动）
+        #    weight 从 -0.002 提到 -0.01（5x），之前累积 -0.146 太大说明手臂还在抖
         self.reward.arm_joint_vel_l2 = RewTerm(
             func=mdp.joint_vel_l2,
-            weight=-0.002,
+            weight=-0.01,
             params={
                 "asset_cfg": SceneEntityCfg(
                     "robot", joint_names=[".*_shoulder_.*", ".*_elbow.*", ".*_wrist.*"]
@@ -215,11 +216,11 @@ class TienKungWalkAMPG1AgentCfg(RslRlOnPolicyRunnerCfg):
     # ⬇ 严格对齐 G1DWAQ_Lab 参考实现
     # 注意：amp_motion_weights 在参考 runner 里支持，但本仓库 amp_on_policy_runner.py
     # 只读 amp_motion_files，没有这个字段，加了也不会被读，所以不加。
-    amp_reward_coef = 1.0                # 从 2.0 降到 1.0（之前 policy 过度模仿 expert 学坏）
+    amp_reward_coef = 2.0                 # AMP 信号 ×2（让 expert motion 强引导，对抗 sim-specific bias）
     amp_motion_files = [
         "legged_lab/envs/g1/datasets/g1_lafan_walk.txt",
     ]
     amp_num_preload_transitions = 100000
-    amp_task_reward_lerp = 0.7            # 70% task + 30% AMP（task 主导，跟 TienKung walk 一致）
+    amp_task_reward_lerp = 0.3            # AMP 70% + task 30%（AMP 主导步态，sim2sim 鲁棒）
     amp_discr_hidden_dims = [1024, 512, 256]
     min_normalized_std = [0.05] * 23      # 动作标准差下界（23 = AMP 关节子集，含 waist）

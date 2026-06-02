@@ -154,21 +154,65 @@ class MujocoG1Runner:
             [cfg.robot.gait_phase_offset_l, cfg.robot.gait_phase_offset_r], dtype=np.float32
         )
 
-        # 命令速度（默认 0；W/S/A/D/Q/E 改，SPACE 清零）
-        self.command_vel = np.zeros(3, dtype=np.float32)
+        # 命令速度（默认 vx=0.5 让 G1 自动走；W/S/A/D/Q/E 改，SPACE 清零）
+        # cmd=0 时 policy 行为弱（训练 rel_standing_envs=0.2），demo 直接给走的 cmd
+        self.command_vel = np.array([0.5, 0.0, 0.0], dtype=np.float32)
 
         # obs history buffer (oldest first, newest last)
         self.obs_history = np.zeros(
             cfg.sim.num_obs_per_step * cfg.sim.actor_obs_history_length, dtype=np.float32
         )
 
-        # 初始化 robot 站姿（写 mujoco 顺序的 default pose）
-        default_mujoco = self.default_dof_pos[ISAAC_TO_MUJOCO_IDX]
-        self.data.qpos[0:3] = [0.0, 0.0, 0.80]
-        self.data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
-        self.data.qpos[7:36] = default_mujoco
-        self.data.qvel[:] = 0
+        # 初始化 robot 站姿
+        # 用 expert 数据 RSI warm-start: 训练时 empirical_normalization 的 mean 是 walking-mid 状态
+        # 如果 sim2sim 用 default pose cold-start，normalizer 把 obs 标成 5+ sigma → policy 崩
+        # 抽 expert 一帧让初始 obs 落在训练分布内
+        rsi_file = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+            "envs/g1/datasets/g1_lafan_walk.txt",
+        )
+        used_rsi = self._init_rsi(rsi_file)
+        if not used_rsi:
+            print("[WARN] RSI failed, fallback to default pose")
+            default_mujoco = self.default_dof_pos[ISAAC_TO_MUJOCO_IDX]
+            self.data.qpos[0:3] = [0.0, 0.0, 0.80]
+            self.data.qpos[3:7] = [1.0, 0.0, 0.0, 0.0]
+            self.data.qpos[7:36] = default_mujoco
+            self.data.qvel[:] = 0
         mujoco.mj_forward(self.model, self.data)
+
+    def _init_rsi(self, rsi_file):
+        """从 expert 数据抽一帧 spawn G1，让初始 obs 接近训练分布。"""
+        import json
+        if not os.path.isfile(rsi_file):
+            return False
+        with open(rsi_file) as f:
+            data = json.load(f)
+        if "Frames" not in data or "MujocoJointNames" not in data:
+            return False
+        mj_names = data["MujocoJointNames"]
+        if mj_names != MUJOCO_JOINT_ORDER:
+            print(f"[WARN] RSI MujocoJointNames mismatch")
+            return False
+
+        frames = np.array(data["Frames"], dtype=np.float32)
+        # 字段 (与 g1_env.py:345-354 一致):
+        #   [64:67]   root_pos
+        #   [67:71]   root_quat (wxyz)
+        #   [71:100]  dof_pos (mujoco order)
+        #   [100:129] dof_vel (mujoco order)
+        # root_pos x/y 平移到 0（避免 spawn 在远处看不见），z 用 expert 值
+        # vel 全设 0，让 G1 从该姿态静态起步（更稳，policy 看到 dof_vel 在分布内）
+        idx = np.random.randint(0, len(frames))
+        frame = frames[idx]
+        self.data.qpos[0] = 0.0
+        self.data.qpos[1] = 0.0
+        self.data.qpos[2] = float(frame[66])  # root z
+        self.data.qpos[3:7] = frame[67:71]    # quat wxyz
+        self.data.qpos[7:36] = frame[71:100]  # dof_pos mujoco order
+        self.data.qvel[:] = 0
+        print(f"[INFO] RSI: spawned from frame {idx}/{len(frames)} (root_z={frame[66]:.3f})")
+        return True
 
     # ---------- obs 计算 ----------
     def get_obs(self):
@@ -226,8 +270,9 @@ class MujocoG1Runner:
             if counter % self.cfg.sim.decimation == 0:
                 obs = self.get_obs()
                 with torch.inference_mode():
-                    action_tensor = self.policy(torch.tensor(obs, dtype=torch.float32))
-                self.action = action_tensor.detach().numpy()[:self.cfg.sim.num_action].astype(np.float32)
+                    # policy 可能输出 (29,) 或 (1, 29)（带 normalizer 时），用 squeeze 兼容两者
+                    action_tensor = self.policy(torch.tensor(obs, dtype=torch.float32).unsqueeze(0))
+                self.action = action_tensor.detach().numpy().squeeze().astype(np.float32)
                 self.action = np.clip(self.action, -self.cfg.sim.clip_actions, self.cfg.sim.clip_actions)
                 target_dof_pos = self.compute_target_dof_pos_mujoco()
 

@@ -114,6 +114,7 @@ def ang_vel_xy_l2(
 def energy(
     env: BaseEnv | TienKungEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
+    """关节功率 |torque * qd| 的范数，惩罚高能耗动作。"""
     asset: Articulation = env.scene[asset_cfg.name]
     reward = torch.norm(
         torch.abs(asset.data.applied_torque * asset.data.joint_vel), dim=-1
@@ -124,11 +125,13 @@ def energy(
 def joint_acc_l2(
     env: BaseEnv | TienKungEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
+    """关节角加速度 L2 平方和，抑制电机突变。"""
     asset: Articulation = env.scene[asset_cfg.name]
     return torch.sum(torch.square(asset.data.joint_acc[:, asset_cfg.joint_ids]), dim=1)
 
 
 def action_rate_l2(env: BaseEnv | TienKungEnv) -> torch.Tensor:
+    """相邻两步 action 差的 L2 平方和，惩罚动作抖动。"""
     return torch.sum(
         torch.square(
             env.action_buffer._circular_buffer.buffer[:, -1, :]
@@ -141,6 +144,7 @@ def action_rate_l2(env: BaseEnv | TienKungEnv) -> torch.Tensor:
 def undesired_contacts(
     env: BaseEnv | TienKungEnv, threshold: float, sensor_cfg: SceneEntityCfg
 ) -> torch.Tensor:
+    """指定 body 接触力超 threshold 的数量，用于惩罚 hip/knee 等不该着地的部位碰撞。"""
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     net_contact_forces = contact_sensor.data.net_forces_w_history
     is_contact = (
@@ -155,6 +159,7 @@ def undesired_contacts(
 def fly(
     env: BaseEnv | TienKungEnv, threshold: float, sensor_cfg: SceneEntityCfg
 ) -> torch.Tensor:
+    """双脚同时离地（接触力都 < threshold）返回 1，防止 policy 学小跳前进。"""
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     net_contact_forces = contact_sensor.data.net_forces_w_history
     is_contact = (
@@ -169,6 +174,7 @@ def fly(
 def flat_orientation_l2(
     env: BaseEnv | TienKungEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
+    """投影重力 xy 分量平方和，机身越倾斜值越大，让 pelvis 保持竖直。"""
     asset: Articulation = env.scene[asset_cfg.name]
     return torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
 
@@ -181,6 +187,10 @@ def is_terminated(env: BaseEnv | TienKungEnv) -> torch.Tensor:
 def feet_air_time_positive_biped(
     env: BaseEnv | TienKungEnv, threshold: float, sensor_cfg: SceneEntityCfg
 ) -> torch.Tensor:
+    """单脚支撑相奖励：奖励当前单脚支撑（air 或 contact）持续时间，上限 threshold。
+
+    cmd ≈ 0 时不奖励（避免站立时硬要走路）。
+    """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     air_time = contact_sensor.data.current_air_time[:, sensor_cfg.body_ids]
     contact_time = contact_sensor.data.current_contact_time[:, sensor_cfg.body_ids]
@@ -191,7 +201,7 @@ def feet_air_time_positive_biped(
         torch.where(single_stance.unsqueeze(-1), in_mode_time, 0.0), dim=1
     )[0]
     reward = torch.clamp(reward, max=threshold)
-    # no reward for zero command
+    # cmd 接近 0 时归零，不强迫站立的机器人迈步
     reward *= (
         torch.norm(env.command_generator.command[:, :2], dim=1)
         + torch.abs(env.command_generator.command[:, 2])
@@ -204,6 +214,7 @@ def feet_slide(
     sensor_cfg: SceneEntityCfg,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
+    """脚着地时的水平速度，惩罚拖步/打滑（着地了还在水平方向移动）。"""
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     contacts = (
         contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
@@ -223,6 +234,7 @@ def body_force(
     threshold: float = 500,
     max_reward: float = 400,
 ) -> torch.Tensor:
+    """脚部 z 方向接触力超 threshold 的部分，惩罚硬着地冲击（保护机械）。"""
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     reward = contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, 2].norm(dim=-1)
     reward[reward < threshold] = 0
@@ -234,6 +246,7 @@ def body_force(
 def joint_deviation_l1(
     env: BaseEnv | TienKungEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
+    """关节与默认姿态的 L1 偏差，只在 cmd ≈ 0 时生效（让 robot 站住时保持 default pose）。"""
     asset: Articulation = env.scene[asset_cfg.name]
     angle = (
         asset.data.joint_pos[:, asset_cfg.joint_ids]
@@ -265,6 +278,7 @@ def joint_deviation_l1_always(
 def body_orientation_l2(
     env: BaseEnv | TienKungEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
+    """指定 body（如 pelvis）投影重力 xy 分量平方和，惩罚该 body 倾斜。"""
     asset: Articulation = env.scene[asset_cfg.name]
     body_orientation = math_utils.quat_rotate_inverse(
         asset.data.body_quat_w[:, asset_cfg.body_ids[0], :], asset.data.GRAVITY_VEC_W
@@ -275,6 +289,7 @@ def body_orientation_l2(
 def feet_stumble(
     env: BaseEnv | TienKungEnv, sensor_cfg: SceneEntityCfg
 ) -> torch.Tensor:
+    """脚水平接触力 > 5x 垂直接触力 → 判定为脚卡到障碍物（绊脚）。"""
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     return torch.any(
         torch.norm(contact_sensor.data.net_forces_w[:, sensor_cfg.body_ids, :2], dim=2)
@@ -288,6 +303,7 @@ def feet_too_near_humanoid(
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     threshold: float = 0.2,
 ) -> torch.Tensor:
+    """双脚距离 < threshold 时惩罚（threshold - dist），避免脚互相绊到。"""
     assert len(asset_cfg.body_ids) == 2
     asset: Articulation = env.scene[asset_cfg.name]
     feet_pos = asset.data.body_pos_w[:, asset_cfg.body_ids, :]

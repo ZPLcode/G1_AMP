@@ -54,7 +54,7 @@ class G1RewardCfg:
     body_orientation_l2 = RewTerm(
         func=mdp.body_orientation_l2,
         params={"asset_cfg": SceneEntityCfg("robot", body_names="pelvis")},
-        weight=-2.0,
+        weight=-1.0,
     )
     flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-1.0)
 
@@ -64,8 +64,7 @@ class G1RewardCfg:
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
     dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-2.0)
 
-    # 碰撞惩罚（参考 unitree_rl_gym g1_config.py: penalize_contacts_on = ["hip", "knee"]）
-    # IsaacLab 用 regex，"hip" 部分匹配等价于 ".*hip.*"
+    # 碰撞惩罚
     undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
         weight=-1.0,
@@ -109,7 +108,7 @@ class G1RewardCfg:
     )
     feet_y_distance = RewTerm(func=mdp.feet_y_distance, weight=-2.0)
 
-    # 关节偏离默认姿态（G1 joint 命名：.*_hip_yaw_joint, .*_knee_joint）
+    # 关节偏离默认姿态
     joint_deviation_hip = RewTerm(
         func=mdp.joint_deviation_l1,
         weight=-0.15,
@@ -134,7 +133,7 @@ class G1RewardCfg:
                 joint_names=[
                     ".*_shoulder_roll_joint",
                     ".*_shoulder_yaw_joint",
-                    ".*_elbow_roll_joint",  # G1 有，TienKung 没有
+                    ".*_elbow_roll_joint", 
                 ],
             )
         },
@@ -147,7 +146,7 @@ class G1RewardCfg:
                 "robot",
                 joint_names=[
                     ".*_hip_pitch_joint",
-                    ".*_knee_joint",  # G1 是 knee_joint，不是 knee_pitch
+                    ".*_knee_joint",
                     ".*_ankle_pitch_joint",
                     ".*_ankle_roll_joint",
                 ],
@@ -160,7 +159,7 @@ class G1RewardCfg:
         weight=-0.5,  # 腰部尽量保持直立
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=["torso_joint"])},
     )
-    # G1 新增：手指（不应有大动作）
+   
     joint_deviation_fingers = RewTerm(
         func=mdp.joint_deviation_l1,
         weight=-0.05,

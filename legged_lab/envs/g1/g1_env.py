@@ -181,9 +181,6 @@ class TienKungG1Env(TienKungEnv):
             self.num_envs, device=self.device, dtype=torch.bool
         )
 
-        # ====== H. （已删）手臂末端虚拟偏移
-        # 之前用 elbow + [0,0,-0.3] 近似 hand，现在直接用 wrist_yaw_link 真实位置 ======
-
         # ====== I. 步态时钟参数 ======
         self.gait_phase = torch.zeros(
             self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False
@@ -381,7 +378,7 @@ class TienKungG1Env(TienKungEnv):
         self._rsi_n_frames = N
         self._rsi_prob = float(self.cfg.rsi_prob)
         self._rsi_enabled = True
-        print(f"[INFO] ✅ RSI enabled: {N} reference frames, prob={self._rsi_prob}")
+        print(f"[INFO]  RSI enabled: {N} reference frames, prob={self._rsi_prob}")
 
     def reset(self, env_ids):
         # 1. 标准 reset（default pose）

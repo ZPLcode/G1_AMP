@@ -74,10 +74,10 @@ def play():
     env_cfg.scene.num_envs = 50                             # 减少并行环境为 50，以保证 GUI 渲染帧率极度丝滑
     env_cfg.scene.env_spacing = 2.5                         # 设置环境间的初始间距
     env_cfg.commands.rel_standing_envs = 0.0                # 测试时所有机器人保持行走，不设置静止个体
-    env_cfg.commands.ranges.lin_vel_x = (0.5, 0.5)          # 0.5 m/s（接近训练 command 分布 mean）
+    env_cfg.commands.ranges.lin_vel_x = (0.6, 0.6)          # 0.5 m/s（接近训练 command 分布 mean）
     env_cfg.commands.ranges.lin_vel_y = (0.0, 0.0)          # 强制目标侧向线速度为 0.0 m/s
     env_cfg.scene.height_scanner.drift_range = (0.0, 0.0)   # 消除高度扫描仪的漂移误差
-
+    
     # [DEBUG] 跟训练一致：保留 GRAVEL_TERRAINS_CFG，不改 plane
     env_cfg.scene.terrain_generator = None
     env_cfg.scene.terrain_type = "plane"
